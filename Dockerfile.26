@@ -1,0 +1,86 @@
+FROM heroku/heroku:26-build
+# heroku-26 build images default to a non-root user; we need root to apt-get
+# and to install into /usr/src.
+USER root
+ARG DEBIAN_FRONTEND=noninteractive
+
+# See env vars below to update package versions
+# * $IMAGEMAGICK_VERSION
+# * $LIBWEBP_VERSION
+# * $LIBHEIF_VERSION
+# * $LIBDE265_VERSION
+
+# Everything is built into this prefix so it can be tar'd up for Heroku.
+ENV PREFIX=/usr/src/imagemagick
+ENV PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig
+ENV CMAKE_PREFIX_PATH=$PREFIX
+
+# cmake/pkg-config are needed because libde265 and libheif dropped autotools.
+# (libheif-dev is intentionally NOT installed so we link our own build, not the
+# older system copy.)
+RUN apt-get update && apt-get install -y \
+  cmake pkg-config libjpeg-dev libpng-dev libtiff-dev libgif-dev libomp-dev
+
+# https://github.com/strukturag/libde265/releases
+ENV LIBDE265_VERSION=1.1.1
+
+RUN curl -L https://github.com/strukturag/libde265/releases/download/v$LIBDE265_VERSION/libde265-$LIBDE265_VERSION.tar.gz | tar zx \
+  && cd libde265-$LIBDE265_VERSION \
+  && cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$PREFIX -DCMAKE_INSTALL_LIBDIR=lib \
+  && cmake --build build --parallel 2 \
+  && cmake --install build
+
+# https://github.com/strukturag/libheif/releases
+ENV LIBHEIF_VERSION=1.23.1
+
+RUN curl -L https://github.com/strukturag/libheif/releases/download/v$LIBHEIF_VERSION/libheif-$LIBHEIF_VERSION.tar.gz | tar zx \
+  && cd libheif-$LIBHEIF_VERSION \
+  && cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$PREFIX -DCMAKE_INSTALL_LIBDIR=lib \
+       -DWITH_EXAMPLES=OFF -DBUILD_TESTING=OFF \
+  && cmake --build build --parallel 2 \
+  && cmake --install build
+
+# https://github.com/webmproject/libwebp/tags
+ENV LIBWEBP_VERSION=1.6.0
+
+RUN cd /opt \
+  &&   curl -L http://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-$LIBWEBP_VERSION.tar.gz | tar zx \
+  && cd libwebp-$LIBWEBP_VERSION \
+  && ./configure  \
+  && make \
+  && make install
+
+
+ENV PATH="$PREFIX/bin:$PATH:\$PATH"
+ENV CPPPATH="$PREFIX/include:$CPPPATH"
+ENV CPATH="$PREFIX/include:$CPATH"
+ENV LIBRARY_PATH="$PREFIX/lib:$LIBRARY_PATH"
+ENV LD_LIBRARY_PATH="$PREFIX/lib:$LD_LIBRARY_PATH"
+
+# Remove libwebp from heroku image
+RUN ldconfig $PREFIX/lib/
+
+# https://github.com/ImageMagick/ImageMagick/releases
+ENV IMAGEMAGICK_VERSION=7.1.2-26
+
+RUN cd /usr/src/ \
+  && wget https://github.com/ImageMagick/ImageMagick/archive/refs/tags/$IMAGEMAGICK_VERSION.tar.gz \
+  && tar xf $IMAGEMAGICK_VERSION.tar.gz \
+  && cd ImageMagick-7* \
+  && ./configure --with-heic=yes --with-webp=yes --prefix=$PREFIX \
+  && make \
+  && make install
+
+# Additional copy of libwebp that will be included in the .tar.gz for Heroku
+RUN curl -L http://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-$LIBWEBP_VERSION.tar.gz | tar zx \
+  && cd libwebp-$LIBWEBP_VERSION \
+  && ./configure --prefix=$PREFIX \
+  && make \
+  && make install
+
+RUN cd $PREFIX \
+  && rm -rf build \
+  && mkdir build \
+  && tar czf \
+  $PREFIX/build/imagemagick-heroku-26.tar.gz bin include lib etc share
+CMD ["tail", "-f", "/dev/null"]
